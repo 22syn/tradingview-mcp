@@ -1,4 +1,5 @@
 # CLAUDE.md — tradingview-mcp
+> 📋 **Active plan (2026-07-23):** [docs/plans/2026-07-23-graph-audit-followup.md](docs/plans/2026-07-23-graph-audit-followup.md) — graph-audit follow-up; review before structural changes.
 
 ## Purpose
 
