@@ -220,3 +220,29 @@ test('qualifySymbols drops bare tickers that cannot be resolved', async () => {
   const resolver = async () => [];
   assert.deepEqual(await qualifySymbols(['ZZZNOPE'], resolver), []);
 });
+
+test('parseSearchResults prefers prefix over the display exchange name', () => {
+  // Euronext returns exchange="Euronext Amsterdam" (a label, with a space) and
+  // prefix="EURONEXT" (the routing code). Only the latter resolves on TradingView.
+  const [r] = parseSearchResults([
+    { symbol: 'THEON', exchange: 'Euronext Amsterdam', prefix: 'EURONEXT', country: 'NL', currency_code: 'EUR' },
+  ]);
+  assert.equal(r.tvSymbol, 'EURONEXT:THEON');
+  assert.equal(r.exchange, 'Euronext Amsterdam');
+});
+
+test('parseSearchResults falls back to exchange when there is no prefix', () => {
+  const [r] = parseSearchResults([{ symbol: 'ONTO', exchange: 'NYSE', country: 'US' }]);
+  assert.equal(r.tvSymbol, 'NYSE:ONTO');
+});
+
+test('parseSearchResults keeps currency so callers can disambiguate a shared ticker', () => {
+  // "ORA" is Orange (FR/EUR) on Euronext and Ormat (US/USD) on NYSE. Ranking alone picks
+  // the wrong one; the currency is what tells them apart.
+  const rows = parseSearchResults([
+    { symbol: 'ORA', exchange: 'Euronext Paris', prefix: 'EURONEXT', country: 'FR', currency_code: 'EUR' },
+    { symbol: 'ORA', exchange: 'NYSE', country: 'US', currency_code: 'USD' },
+  ]);
+  assert.equal(rows[0].tvSymbol, 'EURONEXT:ORA');
+  assert.equal(rows.find((r) => r.currency === 'USD')?.tvSymbol, 'NYSE:ORA');
+});

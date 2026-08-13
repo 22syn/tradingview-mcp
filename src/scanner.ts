@@ -222,15 +222,23 @@ export interface SearchResult {
   country: string;
 }
 
-/** Normalize raw symbol-search JSON: strip <em> tags, build EXCHANGE:SYMBOL. */
+/**
+ * Normalize raw symbol-search JSON: strip <em> tags, build EXCHANGE:SYMBOL.
+ *
+ * `prefix` wins over `exchange` when the API supplies it. For Euronext listings the search
+ * returns exchange="Euronext Amsterdam" — a display name, with a space — alongside
+ * prefix="EURONEXT", which is the routing code TradingView actually accepts. Building from
+ * `exchange` alone produced "Euronext Amsterdam:THEON", which no chart or alert resolves.
+ */
 export function parseSearchResults(raw: unknown): SearchResult[] {
   if (!Array.isArray(raw)) return [];
   return raw.map((r: Record<string, unknown>) => {
     const symbol = String(r.symbol ?? '').replace(/<\/?em>/g, '');
     const exchange = String(r.exchange ?? '');
+    const route = String(r.prefix ?? '') || exchange;
     return {
       symbol,
-      tvSymbol: exchange ? `${exchange}:${symbol}` : symbol,
+      tvSymbol: route ? `${route}:${symbol}` : symbol,
       description: String(r.description ?? '').replace(/<\/?em>/g, ''),
       type: String(r.type ?? ''),
       exchange,

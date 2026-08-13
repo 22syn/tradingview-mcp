@@ -10,7 +10,7 @@ import { getPage, PROFILE_DIR } from './browser';
 import {
   isLoggedIn, openWatchlist, readCurrentSymbols, addSymbolsBulk, removeSymbol, captureChart,
 } from './driver';
-import { screener, qualifySymbols, fetchSheetSymbols, QUOTE_COLUMNS, buildIndicatorColumns, parseScanResponse, scan, inferMarket } from './scanner';
+import { screener, qualifySymbols, fetchSheetSymbols, searchSymbol, QUOTE_COLUMNS, buildIndicatorColumns, parseScanResponse, scan, inferMarket } from './scanner';
 import { fetchSharedWatchlist } from './shared-watchlist';
 import { createAlert, deleteAlerts, listAlerts, CONDITIONS, type ConditionKey } from './alerts';
 
@@ -68,6 +68,11 @@ const TOOLS = [
       required: ['symbol', 'price'], additionalProperties: false } },
   { name: 'tv_list_alerts', description: 'List the price alerts currently in the account, as the alerts panel shows them (needs login). Returns { count, alerts: [{ description, detail }] }.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  { name: 'tv_symbol_search', description: 'Resolve a ticker or company name to TradingView symbols (no login). Returns every venue with its currency and country so the caller can disambiguate — "ORA" is Orange on EURONEXT and Ormat on NYSE, and ranking alone picks the wrong one. Returns { query, count, results: [{ tvSymbol, description, exchange, currency, country, type }] }.',
+    inputSchema: { type: 'object', properties: {
+      query: { type: 'string', minLength: 1 },
+      limit: { type: 'number', description: 'Max results (default 10).' } },
+      required: ['query'], additionalProperties: false } },
   { name: 'tv_delete_alert', description: 'Delete EVERY alert whose title contains the given text (case-insensitive, commas ignored). Destructive and matches broadly — pass enough of the title to be unambiguous, and use tv_list_alerts first to see what will match. Returns { deleted, removed, remaining }.',
     inputSchema: { type: 'object', properties: {
       description_contains: { type: 'string', minLength: 2, description: 'Substring of the alert title, e.g. "NXSN Crossing Down".' } },
@@ -104,6 +109,15 @@ server.setRequestHandler(CallToolRequestSchema, async (req) =>
       const symbols = await fetchSharedWatchlist(url);
       return text(JSON.stringify({ url, count: symbols.length, symbols }));
     }
+    // No login: public symbol-search endpoint, so it sits above the ensureReady gate.
+    if (name === 'tv_symbol_search') {
+      const query = String(args.query || '').trim();
+      if (!query) return errText('query is required');
+      const limit = Number(args.limit) > 0 ? Number(args.limit) : 10;
+      const results = (await searchSymbol(query)).slice(0, limit);
+      return text(JSON.stringify({ query, count: results.length, results }));
+    }
+
     if (name === 'tv_screener') {
       const out = await screener({
         filters: (args.filters as { field: string; op: string; value: number | number[] }[]) || [],

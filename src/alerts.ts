@@ -5,13 +5,15 @@ import { dismissPopups } from './driver';
  * alerts.ts — create and list TradingView price alerts through the logged-in profile.
  *
  * Kept out of driver.ts because the alert surface breaks that file's central assumption:
- * every other panel in this repo is reachable by `data-name`, and the alert DIALOG has no
- * `data-name` on a single element. It exposes `data-qa-id` on the price input, `role` +
- * `data-qa-id` on the condition options, and nothing at all on its buttons — those have to
- * be matched by visible text. Selectors here are therefore more fragile than elsewhere in
- * the repo, and ALERT_SELECTORS documents which anchor each one uses so a TradingView
- * redesign can be repaired without re-deriving all of it. Established by DOM inspection
- * 2026-08-13.
+ * every other panel in this repo is reachable by `data-name`, and the alert DIALOG carries
+ * none — it is anchored on `data-qa-id` throughout. ALERT_SELECTORS records which attribute
+ * each hook uses so a TradingView redesign can be repaired without re-deriving the lot.
+ * Established by DOM inspection 2026-08-13.
+ *
+ * The subtlest trap is the SOURCE dropdown. TradingView pre-selects a chart indicator
+ * whenever the layout has one, so a "price alert" created without pinning it produced
+ * "Simple Moving Averages (...) Crossing Down 160.61 on GE" — indistinguishable from a price
+ * alert in the panel, and firing on something else entirely. It is set on every create.
  *
  * The alerts PANEL is better behaved: `data-test-id-widget-type="alerts"` for the panel,
  * `data-name="alert-item-description"` per row, and `alert-delete-button` / `alert-edit-button`
@@ -31,14 +33,30 @@ export const ALERT_SELECTORS = {
   rowDescription: 'div[data-name="alert-item-description"]',
   /** Per-row action, revealed on hover. Scope it to the row body — it is absent globally. */
   rowDelete: '[data-name="alert-delete-button"]',
-  /** The create/edit dialog. No data-name; `data-focus-trap` is the only stable hook. */
-  dialog: 'div[data-focus-trap="true"]',
-  /** Price field inside the dialog. Anchored on data-qa-id, which TV does expose here. */
-  priceInput: 'input[data-qa-id*="end-band-range-input"]',
-  /** Condition options in the operator dropdown. */
+  /** The create/edit dialog. */
+  dialog: '[data-qa-id="alerts-create-edit-dialog"]',
+  /**
+   * FIRST condition dropdown — the alert's SOURCE. Defaults to whatever the chart offers,
+   * so on a layout carrying indicators it silently selects one: on a GE chart with SMAs it
+   * produced "Simple Moving Averages (...) Crossing Down 160.61 on GE" instead of a price
+   * alert. Must be pinned to "Price" explicitly on every create.
+   */
+  sourceSelect: '[data-qa-id*="main-series-select"]',
+  /** Operator dropdown ("Crossing" / "Crossing Up" / "Crossing Down"). */
+  operatorDropdown: '[data-qa-id="operator-dropdown"]',
+  /** Options inside whichever dropdown is currently open. */
   operatorItem: '[data-qa-id="primary-operator-dropdown-item"]',
+  /** Generic option row, used for the source dropdown whose items are not operator items. */
+  itemTitle: '[data-qa-id="item-title"]',
+  /** Price field inside the dialog. */
+  priceInput: 'input[data-qa-id*="end-band-range-input"]',
+  /** The Create button. */
+  submit: '[data-qa-id="submit"]',
   chartCanvas: 'canvas[data-name="pane-canvas"]',
 } as const;
+
+/** The source every stop alert must use. */
+const PRICE_SOURCE = 'Price';
 
 /** Condition wording as TradingView renders it in the operator dropdown. */
 export const CONDITIONS = {
@@ -74,6 +92,57 @@ export interface AlertRow {
  * rows read back empty. That produced a confident "0 alerts" against an account holding
  * three of them. The bell is a toggle, so clicking an already-open panel would close it.
  */
+/**
+ * Click the option in an open dropdown whose text is exactly `label`.
+ *
+ * Two strategies, because TradingView's dropdowns are not consistent with each other:
+ *  1. `itemSelector` — the operator dropdown tags its rows `primary-operator-dropdown-item`.
+ *  2. A DOM scan for a VISIBLE leaf element whose textContent matches exactly — the source
+ *     dropdown's rows ("Price", "Vol", "RSI (14, close)") carry no data-qa-id, no role, and
+ *     no class worth binding to.
+ *
+ * Both compare textContent rather than using `locator.filter({ hasText })`, which compares
+ * Playwright's rendered innerText and matched 0 of 3 visible operator options whose
+ * textContent was exactly "Crossing Down".
+ */
+async function pickOption(page: Page, itemSelector: string, label: string): Promise<boolean> {
+  for (const handle of await page.$$(itemSelector)) {
+    if (((await handle.textContent()) ?? '').trim() !== label) continue;
+    const ok = await handle
+      .click({ timeout: 4000 })
+      .then(() => true)
+      .catch(() => false);
+    if (ok) return true;
+  }
+
+  // Fallback: the deepest visible node whose whole text is the label. Deepest, so a click
+  // lands on the row itself and not on a wrapper that happens to contain it.
+  const box = await page.evaluate((wanted: string) => {
+    const nodes = Array.prototype.slice.call(document.querySelectorAll('div,span,li,button')) as HTMLElement[];
+    let best: HTMLElement | null = null;
+    let bestDepth = -1;
+    for (const el of nodes) {
+      if ((el.textContent || '').trim() !== wanted) continue;
+      const r = el.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) continue;
+      let depth = 0;
+      for (let n: HTMLElement | null = el; n; n = n.parentElement) depth++;
+      if (depth > bestDepth) {
+        best = el;
+        bestDepth = depth;
+      }
+    }
+    if (!best) return null;
+    const r = best.getBoundingClientRect();
+    return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+  }, label);
+  if (!box) return false;
+  return page.mouse
+    .click(box.x, box.y)
+    .then(() => true)
+    .catch(() => false);
+}
+
 async function openPanel(page: Page): Promise<boolean> {
   if (await page.locator(ALERT_SELECTORS.panel).isVisible().catch(() => false)) return true;
   await page.click(ALERT_SELECTORS.panelButton).catch(() => undefined);
@@ -214,26 +283,25 @@ export async function createAlert(page: Page, spec: CreateAlertSpec): Promise<Cr
   }
   await page.waitForTimeout(800);
 
-  // Condition. The current value is the button's label, so click it by its current text.
-  if (condition !== 'crossing') {
-    const opener = page.getByRole('button', { name: CONDITIONS.crossing, exact: true }).first();
-    await opener.click().catch(() => undefined);
+  // SOURCE first, and always — not only when it looks wrong. TradingView pre-selects an
+  // indicator whenever the chart carries one, and an indicator alert reads exactly like a
+  // price alert in the panel. Setting it unconditionally is the only way to be sure.
+  const sourceLabel = (await page.locator(ALERT_SELECTORS.sourceSelect).first().textContent().catch(() => null))?.trim();
+  if (sourceLabel !== PRICE_SOURCE) {
+    await page.locator(ALERT_SELECTORS.sourceSelect).first().click().catch(() => undefined);
     await page.waitForTimeout(900);
-    // Match on textContent via element handles rather than locator.filter({ hasText }).
-    // hasText compares Playwright's rendered innerText, which did not match these options
-    // even though their textContent is exactly "Crossing Down" — verified against the live
-    // dropdown, where the filter returned 0 of 3 visible items.
-    let picked = false;
-    for (const handle of await page.$$(ALERT_SELECTORS.operatorItem)) {
-      const label = (await handle.textContent())?.trim();
-      if (label !== CONDITIONS[condition]) continue;
-      picked = await handle
-        .click({ timeout: 4000 })
-        .then(() => true)
-        .catch(() => false);
-      break;
+    if (!(await pickOption(page, ALERT_SELECTORS.itemTitle, PRICE_SOURCE))) {
+      await page.keyboard.press('Escape').catch(() => undefined);
+      return { created: false, error: `could not set the alert source to ${PRICE_SOURCE} (chart offered "${sourceLabel}")`, description: expected };
     }
-    if (!picked) {
+    await page.waitForTimeout(900);
+  }
+
+  // Condition operator.
+  if (condition !== 'crossing') {
+    await page.locator(ALERT_SELECTORS.operatorDropdown).first().click().catch(() => undefined);
+    await page.waitForTimeout(900);
+    if (!(await pickOption(page, ALERT_SELECTORS.operatorItem, CONDITIONS[condition]))) {
       await page.keyboard.press('Escape').catch(() => undefined);
       return { created: false, error: `condition "${CONDITIONS[condition]}" not selectable`, description: expected };
     }
@@ -252,7 +320,7 @@ export async function createAlert(page: Page, spec: CreateAlertSpec): Promise<Cr
   await page.waitForTimeout(600);
 
   const submitted = await page
-    .getByRole('button', { name: 'Create', exact: true })
+    .locator(ALERT_SELECTORS.submit)
     .first()
     .click({ timeout: 5000 })
     .then(() => true)
