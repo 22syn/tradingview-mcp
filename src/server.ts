@@ -12,6 +12,7 @@ import {
 } from './driver';
 import { screener, qualifySymbols, fetchSheetSymbols, QUOTE_COLUMNS, buildIndicatorColumns, parseScanResponse, scan, inferMarket } from './scanner';
 import { fetchSharedWatchlist } from './shared-watchlist';
+import { createAlert, deleteAlerts, listAlerts, CONDITIONS, type ConditionKey } from './alerts';
 
 // Serialize tool calls — they all drive one shared browser page.
 let lock: Promise<unknown> = Promise.resolve();
@@ -58,6 +59,19 @@ const TOOLS = [
       timeframes: { type: 'array', items: { type: 'string' } },
       market: { type: 'string' } },
       additionalProperties: false } },
+  { name: 'tv_create_alert', description: 'Create a price alert on a symbol (needs login). Condition defaults to crossing_down, the direction a stop-loss cares about. Bare tickers are auto-qualified. Idempotent: an alert whose title already matches is not duplicated. Returns { created, description, existing?, error? }.',
+    inputSchema: { type: 'object', properties: {
+      symbol: { type: 'string', description: 'Ticker or EXCHANGE:SYMBOL, e.g. ONTO or NYSE:ONTO.' },
+      price: { type: 'number' },
+      condition: { type: 'string', enum: ['crossing', 'crossing_up', 'crossing_down'] },
+      message: { type: 'string', description: 'Overrides the auto-generated alert title.' } },
+      required: ['symbol', 'price'], additionalProperties: false } },
+  { name: 'tv_list_alerts', description: 'List the price alerts currently in the account, as the alerts panel shows them (needs login). Returns { count, alerts: [{ description, detail }] }.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+  { name: 'tv_delete_alert', description: 'Delete EVERY alert whose title contains the given text (case-insensitive, commas ignored). Destructive and matches broadly — pass enough of the title to be unambiguous, and use tv_list_alerts first to see what will match. Returns { deleted, removed, remaining }.',
+    inputSchema: { type: 'object', properties: {
+      description_contains: { type: 'string', minLength: 2, description: 'Substring of the alert title, e.g. "NXSN Crossing Down".' } },
+      required: ['description_contains'], additionalProperties: false } },
 ];
 
 function text(t: string) { return { content: [{ type: 'text', text: t }] }; }
@@ -143,6 +157,42 @@ server.setRequestHandler(CallToolRequestSchema, async (req) =>
 
     if (!(await ensureReady(page))) {
       return errText('Not logged into TradingView. Run `npm run login` in the tradingview-mcp repo once.');
+    }
+
+    if (name === 'tv_list_alerts') {
+      const alerts = await listAlerts(page);
+      return text(JSON.stringify({ count: alerts.length, alerts }));
+    }
+
+    if (name === 'tv_delete_alert') {
+      const needle = String(args.description_contains || '').trim();
+      // Guard the blast radius: a one-character needle would match most of the panel.
+      if (needle.length < 2) return errText('description_contains must be at least 2 characters');
+      const out = await deleteAlerts(page, needle);
+      return text(JSON.stringify(out));
+    }
+
+    if (name === 'tv_create_alert') {
+      const raw = String(args.symbol || '').trim();
+      const price = Number(args.price);
+      if (!raw) return errText('symbol is required');
+      if (!Number.isFinite(price) || price <= 0) return errText('price must be a positive number');
+      const condition = (args.condition as ConditionKey) || 'crossing_down';
+      if (!(condition in CONDITIONS)) return errText(`unknown condition: ${condition}`);
+
+      // Qualify first. TradingView answers an unqualified or wrong-exchange symbol with
+      // "Can't create alert on invalid symbol" — a modal, not an error we could read back.
+      const [qualified] = raw.includes(':') ? [raw] : await qualifySymbols([raw]);
+      if (!qualified) return errText(`could not qualify symbol: ${raw}`);
+
+      const result = await createAlert(page, {
+        symbol: qualified,
+        price,
+        condition,
+        ...(args.message ? { message: String(args.message) } : {}),
+      });
+      // A refusal is data, not a transport failure — the caller decides what to do with it.
+      return text(JSON.stringify({ symbol: qualified, ...result }));
     }
 
     if (name === 'tv_screenshot') {

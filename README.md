@@ -1,10 +1,10 @@
 # tradingview-mcp
 
-A standalone MCP server for TradingView automation: chart screenshots, watchlist CRUD by name, and session status. Runs in-process via `tsx` (no compiled output needed).
+A standalone MCP server for TradingView automation: chart screenshots, watchlist CRUD by name, price alerts, and session status. Runs in-process via `tsx` (no compiled output needed).
 
 ## What it is
 
-An MCP server exposing 8 tools — some drive a persistent Chromium profile via Playwright (chart screenshots, read/add/remove symbols in named watchlists, login state), others hit TradingView's public endpoints with no login (screener, watchlist data, shared-watchlist reads). Because it uses a persistent profile, you log in once interactively and all subsequent browser tool calls reuse that session.
+An MCP server exposing 11 tools — some drive a persistent Chromium profile via Playwright (chart screenshots, read/add/remove symbols in named watchlists, login state), others hit TradingView's public endpoints with no login (screener, watchlist data, shared-watchlist reads). Because it uses a persistent profile, you log in once interactively and all subsequent browser tool calls reuse that session.
 
 ## Setup
 
@@ -36,6 +36,20 @@ This opens a non-headless Chromium window pointed at TradingView's sign-in page.
 | `tv_add_symbols` | Add symbols to a named watchlist (creates the list if it doesn't exist). Required: `watchlist`, `symbols` (array). |
 | `tv_remove_symbols` | Remove symbols from a named watchlist. Required: `watchlist`, `symbols` (array). |
 | `tv_session_status` | Report whether the saved profile is currently logged in. Returns `{ loggedIn, profileDir }`. |
+| `tv_create_alert` | Create a price alert. Required: `symbol`, `price`. Optional: `condition` (`crossing` / `crossing_up` / `crossing_down`, default **crossing_down**), `message`. Bare tickers are auto-qualified. Idempotent — a matching alert is not duplicated. |
+| `tv_list_alerts` | List the account's alerts as the alerts panel shows them. Returns `{ count, alerts: [{ description, detail }] }`. |
+| `tv_delete_alert` | Delete **every** alert whose title contains `description_contains`. Destructive and matches broadly — list first. Returns `{ deleted, removed, remaining }`. |
+
+### Alerts — two things to know
+
+**The level gets rounded to the instrument's tick.** Asking for `19322` on `TASE:NXSN` stores
+`19,320`. `tv_create_alert` reports the level TradingView actually kept, and the idempotency
+check allows 0.1% so a rounded level is not mistaken for a new one and duplicated.
+
+**Qualify or fail loudly.** An unqualified or wrong-exchange symbol makes TradingView answer
+with a modal — "Can't create alert on invalid symbol" — that the tool cannot read back. Bare
+tickers are resolved through the same symbol search the screener uses (`ONTO` → `NYSE:ONTO`);
+pass `EXCHANGE:SYMBOL` yourself to skip it.
 
 ## Data tools (no login required)
 
@@ -67,7 +81,7 @@ These hit TradingView's public endpoints directly — they work even when `tv_se
 claude mcp add tradingview --scope user -- npx tsx /path/to/tradingview-mcp/src/server.ts
 ```
 
-Replace `/path/to/tradingview-mcp` with the absolute path where you cloned the repo. After registering, reload Claude Code (or start a new session). The 8 `tv_*` tools will be available.
+Replace `/path/to/tradingview-mcp` with the absolute path where you cloned the repo. After registering, reload Claude Code (or start a new session). The 11 `tv_*` tools will be available.
 
 ## Development
 
