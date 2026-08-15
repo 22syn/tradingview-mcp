@@ -348,9 +348,15 @@ export async function createAlert(page: Page, spec: CreateAlertSpec): Promise<Cr
 export interface DeleteAlertResult {
   /** Rows that actually disappeared, measured before vs after — not clicks attempted. */
   deleted: number;
-  /** Descriptions of the rows targeted, as they read before deletion. */
+  /** Descriptions of the rows that actually went, confirmed against the panel. */
   removed: string[];
   remaining: number;
+  /**
+   * Rows that disappeared WITHOUT matching the needle. Always empty in normal operation;
+   * a non-empty value means the deletion hit something it was not aiming at, and the loop
+   * stopped rather than continuing.
+   */
+  collateral?: string[];
 }
 
 /**
@@ -373,9 +379,14 @@ export async function deleteAlerts(page: Page, descriptionContains: string): Pro
     log('  ⚠️ alerts panel did not open');
     return { deleted: 0, removed: [], remaining: 0 };
   }
-  const before = (await listAlerts(page)).length;
+  const matches = (text: string): boolean =>
+    text.replace(/,/g, '').toLowerCase().includes(needle);
+
+  let snapshot = (await listAlerts(page)).map((a) => a.description);
+  const startCount = snapshot.length;
 
   const removed: string[] = [];
+  const collateral: string[] = [];
   // Bounded rather than while(true): a delete button that silently no-ops would otherwise
   // spin forever against the live account.
   for (let pass = 0; pass < 50; pass++) {
@@ -384,7 +395,7 @@ export async function deleteAlerts(page: Page, descriptionContains: string): Pro
     let target: { handle: (typeof rows)[number]; text: string } | null = null;
     for (const handle of rows) {
       const text = ((await handle.textContent()) || '').trim();
-      if (text.replace(/,/g, '').toLowerCase().includes(needle)) {
+      if (matches(text)) {
         target = { handle, text };
         break;
       }
@@ -398,6 +409,17 @@ export async function deleteAlerts(page: Page, descriptionContains: string): Pro
     if (!bodyEl) break;
     await bodyEl.hover().catch(() => undefined);
     await page.waitForTimeout(400);
+
+    // Re-read the row's text through the SAME handle immediately before clicking. Node
+    // reuse across re-renders was tested and does not happen on this list, but the click
+    // is the irreversible step and this costs one DOM read: if the handle no longer shows
+    // what it was selected for, do not press delete on it.
+    const stillMatches = matches(((await bodyEl.textContent()) || '').trim());
+    if (!stillMatches) {
+      log(`  ⚠️ row changed under the handle before delete — skipping this pass`);
+      continue;
+    }
+
     const del = await bodyEl.$(ALERT_SELECTORS.rowDelete);
     if (!del) {
       log(`  ⚠️ no delete button on row: ${target.text.slice(0, 40)}`);
@@ -415,12 +437,45 @@ export async function deleteAlerts(page: Page, descriptionContains: string): Pro
         break;
       }
     }
-    removed.push(target.text);
-    log(`  🗑 deleted: ${target.text.slice(0, 50)}`);
+
+    // Confirm against the panel what actually went. A row mid-removal lingers in the DOM
+    // and gets targeted again, so counting clicks over-reports — a two-row cleanup once
+    // reported four. More importantly, this is what would catch a deletion landing on the
+    // wrong alert: anything that disappeared without matching the needle is collateral,
+    // and the loop stops instead of continuing to press delete.
+    await page.waitForTimeout(600);
+    const now = (await listAlerts(page)).map((a) => a.description);
+    // Deduplicate: the panel transiently renders a row twice while it animates in or out,
+    // so a single deletion can otherwise be reported as two. Observed live — a one-alert
+    // delete listed the same description twice while correctly reporting deleted: 1.
+    const gone = [...new Set(snapshot.filter((d) => !now.includes(d)))];
+    snapshot = now;
+    for (const d of gone) {
+      if (matches(d)) {
+        removed.push(d);
+        log(`  🗑 deleted: ${d.slice(0, 50)}`);
+      } else {
+        collateral.push(d);
+        log(`  ‼️ COLLATERAL: "${d.slice(0, 50)}" vanished but does not match "${needle}"`);
+      }
+    }
+    if (collateral.length > 0) {
+      log('  ‼️ stopping: something was removed that was not targeted');
+      break;
+    }
+    if (gone.length === 0) {
+      // The click did nothing visible. Continuing would re-press delete on the same row
+      // forever; the bounded loop would mask it as success.
+      log('  ⚠️ delete click had no effect on the list — stopping');
+      break;
+    }
   }
 
-  // Count what actually went, not how many clicks were issued. A row mid-removal is still
-  // briefly in the DOM and gets targeted again — that made a 2-row cleanup report "4".
-  const remaining = (await listAlerts(page)).length;
-  return { deleted: Math.max(0, before - remaining), removed, remaining };
+  const remaining = snapshot.length;
+  return {
+    deleted: Math.max(0, startCount - remaining),
+    removed,
+    remaining,
+    ...(collateral.length > 0 ? { collateral } : {}),
+  };
 }
