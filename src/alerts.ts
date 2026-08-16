@@ -370,6 +370,30 @@ export interface DeleteAlertResult {
  * Rows are re-queried after every removal — the list re-renders, so handles from the first
  * pass go stale immediately.
  */
+/**
+ * Does `text` contain `needle` as a whole-word sequence?
+ *
+ * Plain `includes()` is what deleted a BSEN alert during a GE cleanup on 2026-08-13.
+ * TradingView describes an indicator-sourced alert as
+ * `Simple Moving Averages (…) Crossing 48,900 on BSEN, 1D` — and "aver(ge)s" contains
+ * "ge", so a two-letter ticker matched a row belonging to a different symbol entirely.
+ *
+ * The collateral check downstream could not catch it. That check flags rows that vanish
+ * *without* matching the needle; an over-broad needle makes the wrong row a legitimate
+ * match by the function's own rule, so the deletion looked correct all the way through.
+ * The guard therefore has to live here, at the point the needle is interpreted.
+ *
+ * A word boundary is enough: `GE` still matches `GE Crossing Down 160.61` and
+ * `… on GE, 1D`, but no longer matches `Averages`.
+ */
+export function matchesDescription(text: string, needle: string): boolean {
+  const normalize = (s: string): string => s.replace(/,/g, '').toLowerCase().trim();
+  const n = normalize(needle);
+  if (!n) return false;
+  const escaped = n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(^|\\W)${escaped}(\\W|$)`).test(normalize(text));
+}
+
 export async function deleteAlerts(page: Page, descriptionContains: string): Promise<DeleteAlertResult> {
   const needle = descriptionContains.replace(/,/g, '').toLowerCase().trim();
   if (!needle) return { deleted: 0, removed: [], remaining: (await listAlerts(page)).length };
@@ -379,8 +403,7 @@ export async function deleteAlerts(page: Page, descriptionContains: string): Pro
     log('  ⚠️ alerts panel did not open');
     return { deleted: 0, removed: [], remaining: 0 };
   }
-  const matches = (text: string): boolean =>
-    text.replace(/,/g, '').toLowerCase().includes(needle);
+  const matches = (text: string): boolean => matchesDescription(text, needle);
 
   let snapshot = (await listAlerts(page)).map((a) => a.description);
   const startCount = snapshot.length;

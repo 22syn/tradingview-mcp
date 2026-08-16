@@ -1,6 +1,47 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { matchesAlert, CONDITIONS } from '../src/alerts';
+import { matchesAlert, matchesDescription, CONDITIONS } from '../src/alerts';
+
+/**
+ * The needle passed to deleteAlerts decides which rows get pressed. On 2026-08-13 a GE
+ * cleanup removed a BSEN alert, because TradingView renders an indicator-sourced alert as
+ * "Simple Moving Averages (…) on BSEN, 1D" and substring matching found "ge" inside
+ * "Averages". These pin the boundary rule that replaced it.
+ */
+describe('matchesDescription', () => {
+  const SMA_ON_BSEN =
+    'Simple Moving Averages (20, close, 50, close, 100, close) Crossing 48,900 on BSEN, 1D';
+
+  it('does not let a two-letter ticker match "Averages"', () => {
+    assert.equal(matchesDescription(SMA_ON_BSEN, 'GE'), false);
+  });
+
+  it('still matches the ticker it was aimed at', () => {
+    assert.equal(matchesDescription('GE Crossing Down 160.61', 'GE'), true);
+    assert.equal(matchesDescription('BSEN Crossing Down 48,900', 'BSEN'), true);
+  });
+
+  it('matches a ticker named at the end of an indicator description', () => {
+    assert.equal(matchesDescription(SMA_ON_BSEN, 'BSEN'), true);
+  });
+
+  it('matches the multi-word needle the sync actually sends', () => {
+    assert.equal(matchesDescription('GE Crossing Down 160.61', 'GE Crossing Down'), true);
+    assert.equal(matchesDescription('BSEN Crossing Down 48,900', 'GE Crossing Down'), false);
+  });
+
+  it('ignores commas on both sides, as the panel renders them', () => {
+    assert.equal(matchesDescription('NXSN Crossing Down 19,320', '19320'), true);
+  });
+
+  it('treats a dotted ticker literally, not as a regex wildcard', () => {
+    assert.equal(matchesDescription('BRKXB Crossing Down 12', 'BRK.B'), false);
+  });
+
+  it('refuses an empty needle rather than matching everything', () => {
+    assert.equal(matchesDescription('GE Crossing Down 160.61', '   '), false);
+  });
+});
 
 /**
  * matchesAlert is the whole idempotency guard: get it wrong in one direction and every run
