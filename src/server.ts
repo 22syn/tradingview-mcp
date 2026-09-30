@@ -13,6 +13,7 @@ import {
 import { screener, qualifySymbols, fetchSheetSymbols, searchSymbol, QUOTE_COLUMNS, buildIndicatorColumns, parseScanResponse, scan, inferMarket } from './scanner';
 import { fetchSharedWatchlist } from './shared-watchlist';
 import { createAlert, deleteAlerts, listAlerts, CONDITIONS, type ConditionKey } from './alerts';
+import { readChartData, DEFAULT_BAR_COUNT, MAX_BAR_COUNT } from './chart-data';
 
 // Serialize tool calls — they all drive one shared browser page.
 let lock: Promise<unknown> = Promise.resolve();
@@ -29,6 +30,13 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: {
       symbol: { type: 'string' }, interval: { type: 'string' },
       intervals: { type: 'array', items: { type: 'string' }, maxItems: 4 } },
+      required: ['symbol'], additionalProperties: false } },
+  { name: 'tv_chart_data', description: `Read OHLCV bars and the current value of every indicator on the saved chart layout, straight from the chart (needs login). Gives what the scanner lacks: bar history and custom/Pine indicators already on the layout. Never adds indicators. TradingView may load a substitute venue (NASDAQ:AAPL → BATS:AAPL): prices track closely, but intraday bar volume is then single-venue — check \`warnings\` and use tv_watchlist_data for RVOL. Returns { symbol, chartSymbol, interval, totalBars, bars | summary, studies: [{ name, values }], warnings }.`,
+    inputSchema: { type: 'object', properties: {
+      symbol: { type: 'string', description: 'Ticker or EXCHANGE:SYMBOL, e.g. AAPL or NASDAQ:AAPL.' },
+      interval: { type: 'string', description: 'D (default), W, M, 60, 240, 15…' },
+      count: { type: 'number', description: `Bars to return (default ${DEFAULT_BAR_COUNT}, max ${MAX_BAR_COUNT}).` },
+      summary: { type: 'boolean', description: 'Return range stats + last 5 bars instead of every bar.' } },
       required: ['symbol'], additionalProperties: false } },
   { name: 'tv_read_watchlist', description: 'Read the symbols in a named TradingView watchlist.',
     inputSchema: { type: 'object', properties: { watchlist: { type: 'string' } }, required: ['watchlist'], additionalProperties: false } },
@@ -207,6 +215,22 @@ server.setRequestHandler(CallToolRequestSchema, async (req) =>
       });
       // A refusal is data, not a transport failure — the caller decides what to do with it.
       return text(JSON.stringify({ symbol: qualified, ...result }));
+    }
+
+    if (name === 'tv_chart_data') {
+      const raw = String(args.symbol || '').trim();
+      if (!raw) return errText('symbol is required');
+      // Qualify so chartWarnings can see the exchange and flag a substitute-venue load.
+      // Top-ranked hit, like tv_create_alert — pass EXCHANGE:SYMBOL for ambiguous tickers (ORA).
+      const [symbol] = raw.includes(':') ? [raw] : await qualifySymbols([raw]);
+      if (!symbol) return errText(`could not qualify symbol: ${raw}`);
+      const out = await readChartData(page, {
+        symbol,
+        interval: args.interval ? String(args.interval) : undefined,
+        count: Number(args.count),
+        summary: args.summary === true,
+      });
+      return text(JSON.stringify(out));
     }
 
     if (name === 'tv_screenshot') {

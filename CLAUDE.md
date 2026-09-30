@@ -22,8 +22,9 @@ check login state. Runs in-process via `tsx` (no build step).
 - `src/browser.ts` — persistent Chromium profile / Playwright setup
 - `src/scanner.ts` — screener + watchlist-data logic against public endpoints
 - `src/shared-watchlist.ts` — read a shared/public watchlist from its URL (no login)
+- `src/chart-data.ts` — read bars + on-layout indicator values from the chart's internal `window.TradingViewApi` (undocumented; can break on a TV release)
 - `src/login.ts` — one-time interactive login flow (`npm run login`)
-- `test/` — unit tests (`driver.test.ts`, `scanner.test.ts`, `shared-watchlist.test.ts`), no browser required
+- `test/` — unit tests (`driver.test.ts`, `scanner.test.ts`, `shared-watchlist.test.ts`, `alerts.test.ts`, `chart-data.test.ts`), no browser required
 
 ## Run / dev
 
@@ -44,8 +45,10 @@ claude mcp add tradingview --scope user -- npx tsx /path/to/tradingview-mcp/src/
 ## Conventions / notes
 
 - Login-based tools reuse a persistent Chromium profile — log in once, sessions persist.
-- Login-required tools: `tv_screenshot`, `tv_read_watchlist`, `tv_add_symbols`,
+- Login-required tools: `tv_screenshot`, `tv_chart_data`, `tv_read_watchlist`, `tv_add_symbols`,
   `tv_remove_symbols`, `tv_session_status`.
+- `tv_chart_data` usually gets a substitute venue (NASDAQ:AAPL → BATS:AAPL). Prices and daily volume
+  match the scanner, but intraday bar volume is single-venue (4–10% of real) — never derive RVOL from it.
 - Data tools (no login): `tv_screener`, `tv_watchlist_data`, `tv_read_shared_watchlist` — hit public endpoints.
 - One `tv_screener` / `tv_watchlist_data` call scans a single market (inferred from
   the first symbol, or set via `market`); mixed-market lists must be split per call.
