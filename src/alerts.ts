@@ -1,5 +1,6 @@
 import type { Page } from 'playwright';
 import { dismissPopups } from './driver';
+import { captureDiagnostics } from './alert-diagnostics';
 
 /**
  * alerts.ts — create and list TradingView price alerts through the logged-in profile.
@@ -192,6 +193,8 @@ export interface CreateAlertResult {
   /** Set when `created` is false and something went wrong. */
   error?: string;
   description?: string;
+  /** Path stem (+ .png / .json) of the screenshot and dialog snapshot saved when the create failed. */
+  diagnostics?: string;
 }
 
 /**
@@ -229,6 +232,27 @@ export function matchesAlert(
   if (!Number.isFinite(level)) return false;
   const tolerance = Math.max(0.005, Math.abs(price) * LEVEL_TOLERANCE_PCT);
   return Math.abs(level - price) <= tolerance;
+}
+
+/**
+ * A failed create, with the browser's state saved first. Must run BEFORE the dialog is
+ * dismissed: the Escape that follows a failure erases exactly what is worth looking at.
+ */
+async function failed(
+  page: Page,
+  spec: CreateAlertSpec,
+  condition: ConditionKey,
+  error: string,
+  description: string,
+): Promise<CreateAlertResult> {
+  const diagnostics = await captureDiagnostics(page, {
+    symbol: spec.symbol,
+    level: spec.price,
+    condition,
+    error,
+  });
+  if (diagnostics) log(`  📸 failure evidence saved: ${diagnostics}.{png,json}`);
+  return { created: false, error, description, ...(diagnostics ? { diagnostics } : {}) };
 }
 
 /**
@@ -279,7 +303,7 @@ export async function createAlert(page: Page, spec: CreateAlertSpec): Promise<Cr
     .then(() => true)
     .catch(() => false);
   if (!opened) {
-    return { created: false, error: 'alert dialog did not open', description: expected };
+    return failed(page, spec, condition, 'alert dialog did not open', expected);
   }
   await page.waitForTimeout(800);
 
@@ -291,8 +315,9 @@ export async function createAlert(page: Page, spec: CreateAlertSpec): Promise<Cr
     await page.locator(ALERT_SELECTORS.sourceSelect).first().click().catch(() => undefined);
     await page.waitForTimeout(900);
     if (!(await pickOption(page, ALERT_SELECTORS.itemTitle, PRICE_SOURCE))) {
+      const res = await failed(page, spec, condition, `could not set the alert source to ${PRICE_SOURCE} (chart offered "${sourceLabel}")`, expected);
       await page.keyboard.press('Escape').catch(() => undefined);
-      return { created: false, error: `could not set the alert source to ${PRICE_SOURCE} (chart offered "${sourceLabel}")`, description: expected };
+      return res;
     }
     await page.waitForTimeout(900);
   }
@@ -302,8 +327,9 @@ export async function createAlert(page: Page, spec: CreateAlertSpec): Promise<Cr
     await page.locator(ALERT_SELECTORS.operatorDropdown).first().click().catch(() => undefined);
     await page.waitForTimeout(900);
     if (!(await pickOption(page, ALERT_SELECTORS.operatorItem, CONDITIONS[condition]))) {
+      const res = await failed(page, spec, condition, `condition "${CONDITIONS[condition]}" not selectable`, expected);
       await page.keyboard.press('Escape').catch(() => undefined);
-      return { created: false, error: `condition "${CONDITIONS[condition]}" not selectable`, description: expected };
+      return res;
     }
     await page.waitForTimeout(700);
   }
@@ -311,8 +337,9 @@ export async function createAlert(page: Page, spec: CreateAlertSpec): Promise<Cr
   // Price.
   const input = await page.$(ALERT_SELECTORS.priceInput);
   if (!input) {
+    const res = await failed(page, spec, condition, 'price input not found', expected);
     await page.keyboard.press('Escape').catch(() => undefined);
-    return { created: false, error: 'price input not found', description: expected };
+    return res;
   }
   await input.fill('');
   await page.waitForTimeout(200);
@@ -326,8 +353,9 @@ export async function createAlert(page: Page, spec: CreateAlertSpec): Promise<Cr
     .then(() => true)
     .catch(() => false);
   if (!submitted) {
+    const res = await failed(page, spec, condition, 'Create button not clickable', expected);
     await page.keyboard.press('Escape').catch(() => undefined);
-    return { created: false, error: 'Create button not clickable', description: expected };
+    return res;
   }
   await page.waitForTimeout(2500);
 
@@ -338,7 +366,7 @@ export async function createAlert(page: Page, spec: CreateAlertSpec): Promise<Cr
     matchesAlert(r.description, bare, CONDITIONS[condition], spec.price),
   );
   if (!landed) {
-    return { created: false, error: 'alert not visible in the panel after Create', description: expected };
+    return failed(page, spec, condition, 'alert not visible in the panel after Create', expected);
   }
   // Report the level TradingView actually stored, not the one that was asked for — they
   // differ whenever the instrument's tick rounds it, and the caller should see the truth.

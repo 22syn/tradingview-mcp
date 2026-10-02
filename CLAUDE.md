@@ -24,7 +24,8 @@ check login state. Runs in-process via `tsx` (no build step).
 - `src/shared-watchlist.ts` — read a shared/public watchlist from its URL (no login)
 - `src/chart-data.ts` — read bars + on-layout indicator values from the chart's internal `window.TradingViewApi` (undocumented; can break on a TV release)
 - `src/login.ts` — one-time interactive login flow (`npm run login`)
-- `test/` — unit tests (`driver.test.ts`, `scanner.test.ts`, `shared-watchlist.test.ts`, `alerts.test.ts`, `chart-data.test.ts`), no browser required
+- `src/alert-diagnostics.ts` — on any `tv_create_alert` failure, saves a screenshot + JSON snapshot of the dialog (data-qa-ids, inputs, other modals, HTML) to `.diagnostics/` (override with `TV_DIAG_DIR`; newest 30 sets kept; gitignored). The failure result carries `diagnostics` (path stem). Added after THEON failed `price input not found` 7 runs with no way to tell why. The in-page snapshot is a *string* script on purpose (tsx injects `__name` into functions); `test/alert-diagnostics.browser.test.ts` runs it in real Chromium and skips if none is installed.
+- `test/` — unit tests (`driver.test.ts`, `scanner.test.ts`, `shared-watchlist.test.ts`, `alerts.test.ts`, `chart-data.test.ts`, `alert-diagnostics.test.ts`; `alert-diagnostics.browser.test.ts` is the one test that launches Chromium), no browser required
 
 ## Run / dev
 
